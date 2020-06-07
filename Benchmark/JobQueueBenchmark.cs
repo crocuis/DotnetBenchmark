@@ -16,13 +16,6 @@ namespace Benchmark
 
     public class JobQueueBenchmark
     {
-
-        private readonly AutoResetEvent _autoResetEvent;
-
-        public JobQueueBenchmark()
-        {
-            _autoResetEvent = new AutoResetEvent(false);
-        }
         [Benchmark]
         public void BlockingCollectionQueue()
         {
@@ -35,11 +28,13 @@ namespace Benchmark
         {
             DoManyJobs(new ChannelsQueue());
         }
+
         [Benchmark]
         public void ChannelsQueueDedicatedThread()
         {
             DoManyJobs(new ChannelsQueueDedicatedThread());
         }
+
         [Benchmark]
         public void ActionBlockQueue()
         {
@@ -70,11 +65,13 @@ namespace Benchmark
             DoManyJobsParallel(new BlockingCollectionQueue());
         }
 
+        private const int Jobs = 10_000_000;
+
         private void DoManyJobs<T>(T jobQueue) where T : IJobQueue<Job>
         {
-            int jobs = 10_000_000;
-            var result = new ConcurrentBag<ClockSpan>();
-            for (int i = 0; i < jobs - 1; i++)
+            var autoResetEvent = new AutoResetEvent(false);
+            var result = new List<ClockSpan>(Jobs - 1);
+            for (int i = 0; i < Jobs; i++)
             {
                 jobQueue.Enqueue(new Job(i, (idx, clockSpan) =>
                 {
@@ -82,8 +79,8 @@ namespace Benchmark
                 }));
             }
 
-            jobQueue.Enqueue(new Job(jobs, (_, __) => _autoResetEvent.Set()));
-            _autoResetEvent.WaitOne();
+            jobQueue.Enqueue(new Job(Jobs, (_, __) => autoResetEvent.Set()));
+            autoResetEvent.WaitOne();
             jobQueue.Stop();
 
             var minSeconds = result.Min(p => p.GetSeconds());
@@ -94,14 +91,17 @@ namespace Benchmark
 
         private void DoManyJobsParallel<T>(T jobQueue) where T : IJobQueue<Job>
         {
-            int jobs = 10_000_000;
-            var result = new ConcurrentBag<ClockSpan>();
-            Parallel.For(0, jobs, (index) =>
+            var autoResetEvent = new AutoResetEvent(false);
+            var result = new List<ClockSpan>(Jobs - 1);
+            Parallel.For(0, Jobs, (index) =>
             {
-                jobQueue.Enqueue(new Job(index, (idx, clockSpan) => { result.Add(clockSpan); }));
+                jobQueue.Enqueue(new Job(index, (idx, clockSpan) =>
+                {
+                    result.Add(clockSpan);
+                }));
             });
-            jobQueue.Enqueue(new Job(jobs, (_, __) => _autoResetEvent.Set()));
-            _autoResetEvent.WaitOne();
+            jobQueue.Enqueue(new Job(Jobs, (_, __) => autoResetEvent.Set()));
+            autoResetEvent.WaitOne();
             jobQueue.Stop();
 
             var minSeconds = result.Min(p => p.GetSeconds());
