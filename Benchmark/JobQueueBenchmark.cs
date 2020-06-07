@@ -1,10 +1,14 @@
 ﻿using BenchmarkDotNet.Attributes;
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
+using Perfolizer.Horology;
 
 namespace Benchmark
 {
@@ -42,28 +46,100 @@ namespace Benchmark
             DoManyJobs(new ActionBlockQueue());
         }
 
-        private void DoManyJobs(IJobQueue<Action> jobQueue)
+        [Benchmark]
+        public void ActionBlockQueueParallel()
+        {
+            DoManyJobsParallel(new ActionBlockQueue());
+        }
+
+        [Benchmark]
+        public void ChannelsQueueParallel()
+        {
+            DoManyJobsParallel(new ChannelsQueue());
+        }
+
+        [Benchmark]
+        public void ChannelsQueueDedicatedThreadParallel()
+        {
+            DoManyJobsParallel(new ChannelsQueueDedicatedThread());
+        }
+
+        [Benchmark]
+        public void BlockingCollectionQueueParallel()
+        {
+            DoManyJobsParallel(new BlockingCollectionQueue());
+        }
+
+        private void DoManyJobs<T>(T jobQueue) where T : IJobQueue<Job>
         {
             int jobs = 10_000_000;
+            var result = new ConcurrentBag<ClockSpan>();
             for (int i = 0; i < jobs - 1; i++)
             {
-                jobQueue.Enqueue(() => { });
+                jobQueue.Enqueue(new Job(i, (idx, clockSpan) =>
+                {
+                    result.Add(clockSpan);
+                }));
             }
-            jobQueue.Enqueue(() => _autoResetEvent.Set());
+
+            jobQueue.Enqueue(new Job(jobs, (_, __) => _autoResetEvent.Set()));
             _autoResetEvent.WaitOne();
             jobQueue.Stop();
+
+            var minSeconds = result.Min(p => p.GetSeconds());
+            var maxSeconds = result.Max(p => p.GetSeconds());
+            var avgSeconds = result.Average(p => p.GetSeconds());
+            Console.WriteLine($"DoManyJobs, {typeof(T).Name}, MinSeconds: {minSeconds}, MaxSeconds: {maxSeconds}, AvgSeconds: {avgSeconds}");
+        }
+
+        private void DoManyJobsParallel<T>(T jobQueue) where T : IJobQueue<Job>
+        {
+            int jobs = 10_000_000;
+            var result = new ConcurrentBag<ClockSpan>();
+            Parallel.For(0, jobs, (index) =>
+            {
+                jobQueue.Enqueue(new Job(index, (idx, clockSpan) => { result.Add(clockSpan); }));
+            });
+            jobQueue.Enqueue(new Job(jobs, (_, __) => _autoResetEvent.Set()));
+            _autoResetEvent.WaitOne();
+            jobQueue.Stop();
+
+            var minSeconds = result.Min(p => p.GetSeconds());
+            var maxSeconds = result.Max(p => p.GetSeconds());
+            var avgSeconds = result.Average(p => p.GetSeconds());
+            Console.WriteLine($"DoManyJobsParallel, {typeof(T).Name}, MinSeconds: {minSeconds}, MaxSeconds: {maxSeconds}, AvgSeconds: {avgSeconds}");
         }
     }
 
-    internal interface IJobQueue<T>
+    internal interface IJobQueue<in T>
     {
-        void Enqueue(Action job);
+        void Enqueue(T job);
         void Stop();
     }
 
-    public class BlockingCollectionQueue : IJobQueue<Action>
+    public struct Job
     {
-        private BlockingCollection<Action> _jobs = new BlockingCollection<Action>(new ConcurrentQueue<Action>());
+        public Job(Int32 idx, Action<int, ClockSpan> action)
+        {
+            Action = action;
+            StartedClock = Chronometer.Start();
+            Index = idx;
+        }
+
+        public void Dispatch()
+        {
+            Action(Index, StartedClock.GetElapsed());
+        }
+
+        public Action<int, ClockSpan> Action;
+        public StartedClock StartedClock;
+        public int Index;
+    }
+
+
+    public class BlockingCollectionQueue : IJobQueue<Job>
+    {
+        private readonly BlockingCollection<Job> _jobs = new BlockingCollection<Job>(new ConcurrentQueue<Job>());
 
         public BlockingCollectionQueue()
         {
@@ -72,7 +148,7 @@ namespace Benchmark
             thread.Start();
         }
 
-        public void Enqueue(Action job)
+        public void Enqueue(Job job)
         {
             _jobs.Add(job);
         }
@@ -81,7 +157,7 @@ namespace Benchmark
         {
             foreach (var job in _jobs.GetConsumingEnumerable(CancellationToken.None))
             {
-                job();
+                job.Dispatch();
             }
         }
         public void Stop()
@@ -90,13 +166,13 @@ namespace Benchmark
         }
     }
 
-    public class ChannelsQueue : IJobQueue<Action>
+    public class ChannelsQueue : IJobQueue<Job>
     {
-        private ChannelWriter<Action> _writer;
+        private readonly ChannelWriter<Job> _writer;
 
         public ChannelsQueue()
         {
-            var channel = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions() { SingleReader = true });
+            var channel = Channel.CreateUnbounded<Job>(new UnboundedChannelOptions() { SingleReader = true });
             var reader = channel.Reader;
             _writer = channel.Writer;
 
@@ -108,13 +184,18 @@ namespace Benchmark
                     // Fast loop around available jobs
                     while (reader.TryRead(out var job))
                     {
-                        job.Invoke();
+                        OnStart(job);
                     }
                 }
             });
         }
 
-        public void Enqueue(Action job)
+        public void OnStart(Job job)
+        {
+            job.Dispatch();
+        }
+
+        public void Enqueue(Job job)
         {
             _writer.TryWrite(job);
         }
@@ -124,13 +205,13 @@ namespace Benchmark
             _writer.Complete();
         }
     }
-    public class ChannelsQueueDedicatedThread : IJobQueue<Action>
+    public class ChannelsQueueDedicatedThread : IJobQueue<Job>
     {
-        private ChannelWriter<Action> _writer;
+        private readonly ChannelWriter<Job> _writer;
 
         public ChannelsQueueDedicatedThread()
         {
-            var channel = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions() { SingleReader = true });
+            var channel = Channel.CreateUnbounded<Job>(new UnboundedChannelOptions() { SingleReader = true });
             _writer = channel.Writer;
             var reader = channel.Reader;
 
@@ -140,21 +221,19 @@ namespace Benchmark
             thread.Start();
         }
 
-        public async void Start(ChannelReader<Action> reader)
+        public async void Start(ChannelReader<Job> reader)
         {
-
-
             while (await reader.WaitToReadAsync())
             {
                 // Fast loop around available jobs
                 while (reader.TryRead(out var job))
                 {
-                    job.Invoke();
+                    job.Dispatch();
                 }
             }
         }
 
-        public void Enqueue(Action job)
+        public void Enqueue(Job job)
         {
             _writer.TryWrite(job);
         }
@@ -165,22 +244,22 @@ namespace Benchmark
         }
     }
 
-    public class ActionBlockQueue : IJobQueue<Action>
+    public class ActionBlockQueue : IJobQueue<Job>
     {
-        private readonly ActionBlock<Action> _writer;
+        private readonly ActionBlock<Job> _writer;
 
         public ActionBlockQueue()
         {
-            _writer = new ActionBlock<Action>(Dispatch);
+            _writer = new ActionBlock<Job>(Dispatch);
         }
-        public void Enqueue(Action job)
+        public void Enqueue(Job job)
         {
             _writer.Post(job);
         }
 
-        public void Dispatch(Action job)
+        public void Dispatch(Job job)
         {
-            job.Invoke();
+            job.Dispatch();
         }
 
         public void Stop()
