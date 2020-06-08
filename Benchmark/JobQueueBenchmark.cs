@@ -42,9 +42,26 @@ namespace Benchmark
         }
 
         [Benchmark]
+        public void ActionBlockQueueDedicatedThreadPool()
+        {
+            DoManyJobs(new ActionBlockQueueDedicateThreadPool(DedicatedThreadPoolTaskScheduler));
+        }
+
+        [Benchmark]
         public void ActionBlockQueueParallel()
         {
             DoManyJobsParallel(new ActionBlockQueue());
+        }
+
+        private static readonly DedicatedThreadPoolSettings DedicatedThreadPoolSettings =
+            new DedicatedThreadPoolSettings(Environment.ProcessorCount * 2);
+        private static readonly DedicatedThreadPoolTaskScheduler DedicatedThreadPoolTaskScheduler =
+            new DedicatedThreadPoolTaskScheduler(new DedicatedThreadPool(DedicatedThreadPoolSettings));
+
+        [Benchmark]
+        public void ActionBlockQueueDedicatedThreadPoolParallel()
+        {
+            DoManyJobsParallel(new ActionBlockQueueDedicateThreadPool(DedicatedThreadPoolTaskScheduler));
         }
 
         [Benchmark]
@@ -71,6 +88,7 @@ namespace Benchmark
         {
             var autoResetEvent = new AutoResetEvent(false);
             var result = new List<ClockSpan>(Jobs - 1);
+            var clock = Chronometer.Start();
             for (int i = 0; i < Jobs; i++)
             {
                 jobQueue.Enqueue(new Job(i, (idx, clockSpan) =>
@@ -86,13 +104,14 @@ namespace Benchmark
             var minSeconds = result.Min(p => p.GetSeconds());
             var maxSeconds = result.Max(p => p.GetSeconds());
             var avgSeconds = result.Average(p => p.GetSeconds());
-            Console.WriteLine($"DoManyJobs, {typeof(T).Name}, MinSeconds: {minSeconds}, MaxSeconds: {maxSeconds}, AvgSeconds: {avgSeconds}");
+            Console.WriteLine($"DoManyJobs, {typeof(T).Name}, Full:{clock.GetElapsed().GetSeconds()} MinSeconds: {minSeconds}, MaxSeconds: {maxSeconds}, AvgSeconds: {avgSeconds}");
         }
 
         private void DoManyJobsParallel<T>(T jobQueue) where T : IJobQueue<Job>
         {
             var autoResetEvent = new AutoResetEvent(false);
             var result = new List<ClockSpan>(Jobs - 1);
+            var clock = Chronometer.Start();
             Parallel.For(0, Jobs, (index) =>
             {
                 jobQueue.Enqueue(new Job(index, (idx, clockSpan) =>
@@ -107,7 +126,7 @@ namespace Benchmark
             var minSeconds = result.Min(p => p.GetSeconds());
             var maxSeconds = result.Max(p => p.GetSeconds());
             var avgSeconds = result.Average(p => p.GetSeconds());
-            Console.WriteLine($"DoManyJobsParallel, {typeof(T).Name}, MinSeconds: {minSeconds}, MaxSeconds: {maxSeconds}, AvgSeconds: {avgSeconds}");
+            Console.WriteLine($"DoManyJobsParallel, {typeof(T).Name}, Full:{clock.GetElapsed().GetSeconds()} MinSeconds: {minSeconds}, MaxSeconds: {maxSeconds}, AvgSeconds: {avgSeconds}");
         }
     }
 
@@ -248,9 +267,9 @@ namespace Benchmark
     {
         private readonly ActionBlock<Job> _writer;
 
-        public ActionBlockQueue()
+        public ActionBlockQueue(TaskScheduler taskScheduler = null)
         {
-            _writer = new ActionBlock<Job>(Dispatch);
+            _writer = new ActionBlock<Job>(Dispatch, new ExecutionDataflowBlockOptions(){TaskScheduler = taskScheduler ?? TaskScheduler.Default });
         }
         public void Enqueue(Job job)
         {
@@ -267,4 +286,12 @@ namespace Benchmark
             _writer.Complete();
         }
     }
+
+    public class ActionBlockQueueDedicateThreadPool : ActionBlockQueue
+    {
+        public ActionBlockQueueDedicateThreadPool(TaskScheduler taskScheduler) : base(taskScheduler)
+        {
+        }
+    }
+
 }

@@ -11,14 +11,20 @@ namespace Benchmark
 
             var instance = new JobQueueBenchmark();
             instance.ActionBlockQueue();
-            instance.ChannelsQueue();
-            instance.BlockingCollectionQueue();
             instance.ActionBlockQueueParallel();
+
+            instance.ActionBlockQueueDedicatedThreadPool();
+            instance.ActionBlockQueueDedicatedThreadPoolParallel();
+            
+            instance.ChannelsQueue();
             instance.ChannelsQueueParallel();
+
+            instance.BlockingCollectionQueue();
             instance.BlockingCollectionQueueParallel();
             instance.ChannelsQueueDedicatedThreadParallel();
+            
 
-            Console.Write("Complete Benchmark");
+            //Console.Write("Complete Benchmark");
             Console.ReadKey();
         }
     }
